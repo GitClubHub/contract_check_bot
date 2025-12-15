@@ -1,17 +1,18 @@
-import os
-from dotenv import load_dotenv
+# config.py - ПРОСТАЯ ВЕРСИЯ БЕЗ DOTENV
 
-load_dotenv()
+# 1. ТОКЕН БОТА ОТ @BOTFATHER
+BOT_TOKEN = "6123456789:AAHdqTcvCH1vGWJxfSeofSAs0K5PALDsaw"
 
-BOT_TOKEN = os.getenv("BOT_TOKEN")  # Получить у @BotFather
-YC_API_KEY = os.getenv("YC_API_KEY")  # Ключ от Яндекс Облака
-YC_FOLDER_ID = os.getenv("YC_FOLDER_ID")  # ID каталога в Яндекс Облаке
-YC_AGENT_ID = os.getenv("YC_AGENT_ID")  # ID вашего агента
+# 2. ДАННЫЕ ОТ ЯНДЕКС ОБЛАКА
+YC_API_KEY = "AQVN1UmjsC7q7KXhTz5R2x1yY9Z8W4BcDeFgH"  # Ваш API-ключ
+YC_FOLDER_ID = "b1g9ma2ql6hex5c3pd4q"                 # ID каталога
+YC_AGENT_ID = "9f8e7d6c-5b4a-3v2g-1h0i-j1k2l3m4n5o6"  # ID агента
 
-# Цены
+# 3. НАСТРОЙКИ
 FREE_CHECKS = 1
 PRICE_PER_CHECK = 299
-
-# Лимиты
 MAX_FILE_SIZE_MB = 20
 SUPPORTED_FORMATS = ['.pdf', '.docx', '.doc', '.txt']
+
+# URL для API агента (автоматически соберется)
+AGENT_API_URL = f"https://agent.llm.api.cloud.yandex.net/llm/v2/folders/{YC_FOLDER_ID}/agents/{YC_AGENT_ID}:chat"
