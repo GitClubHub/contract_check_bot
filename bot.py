@@ -1,6 +1,6 @@
 """
-bot.py - Telegram бот для проверки договоров через YandexGPT
-ВСЁ В ОДНОМ ФАЙЛЕ: бот + парсинг + ИИ
+Telegram бот для проверки договоров
+ВСЁ В ОДНОМ ФАЙЛЕ - для Railway
 """
 
 import os
@@ -8,23 +8,28 @@ import logging
 import tempfile
 import requests
 import sqlite3
+import asyncio
 from datetime import datetime
 
-# ========== ВАШИ НАСТРОЙКИ ==========
+# ========== ВАШИ КЛЮЧИ ==========
 BOT_TOKEN = "7840984761:AAEba5khaFEQ80LPIqT34QVJ84tTxQRlIMk"
 YC_API_KEY = "AQVNw1vfsx6MXgs3I-cmowKh2ZCD1xSHktDdW0ln"
 YC_FOLDER_ID = "b1g4dtdoatk25ohp8m0u"
 YC_AGENT_ID = "fvt3629n2tdfefsjct9d"
 
-# ========== ЦЕНЫ И ЛИМИТЫ ==========
-FREE_CHECKS = 1                    # Бесплатных проверок
-SINGLE_CHECK_PRICE = 69            # 69 рублей за проверку (НОВАЯ ЦЕНА)
-MAX_FILE_SIZE_MB = 15              # Максимальный размер файла
-SUPPORTED_FORMATS = ['.pdf', '.docx', '.doc', '.txt']
+# ========== НАСТРОЙКИ ==========
+FREE_CHECKS = 1
+PRICE_PER_CHECK = 69
+MAX_FILE_SIZE = 15 * 1024 * 1024  # 15 MB
 
-# ========== ИМПОРТЫ TELEGRAM ==========
-from telegram import Update
-from telegram.ext import Application, CommandHandler, MessageHandler, filters, CallbackContext
+# ========== TELEGRAM ИМПОРТ ==========
+try:
+    from telegram import Update
+    from telegram.ext import Application, CommandHandler, MessageHandler, filters, CallbackContext
+    TELEGRAM_OK = True
+except ImportError:
+    TELEGRAM_OK = False
+    print("⚠️ Установите: pip install python-telegram-bot")
 
 # ========== НАСТРОЙКА ЛОГИРОВАНИЯ ==========
 logging.basicConfig(
@@ -33,10 +38,19 @@ logging.basicConfig(
 )
 logger = logging.getLogger(__name__)
 
-# ========== КЛАСС ДЛЯ YANDEX GPT ==========
-class YandexGPTAnalyzer:
-    """Работа с YandexGPT Agent API"""
-    
+# ========== БАЗА ДАННЫХ (В ПАМЯТИ ДЛЯ RAILWAY) ==========
+user_checks = {}  # {user_id: checks_count}
+
+def get_checks(user_id):
+    """Получить количество проверок пользователя"""
+    return user_checks.get(user_id, 0)
+
+def add_check(user_id):
+    """Добавить проверку"""
+    user_checks[user_id] = user_checks.get(user_id, 0) + 1
+
+# ========== YANDEX GPT АНАЛИЗ ==========
+class SimpleAnalyzer:
     def __init__(self):
         self.api_url = f"https://agent.llm.api.cloud.yandex.net/llm/v2/folders/{YC_FOLDER_ID}/agents/{YC_AGENT_ID}:chat"
         self.headers = {
@@ -45,340 +59,241 @@ class YandexGPTAnalyzer:
         }
     
     def analyze(self, text):
-        """Анализ текста договора"""
+        """Простой анализ текста"""
+        if len(text) > 30000:
+            text = text[:30000] + "... [текст сокращен]"
         
-        # Обрезаем слишком длинные тексты
-        if len(text) > 80000:
-            text = text[:80000] + "\n\n[Текст сокращен для анализа]"
-        
-        # Промпт для анализа
-        prompt = f"""
-Ты — опытный юрист. Проанализируй договор и выдели:
+        prompt = f"""Проанализируй этот договор как юрист. Ответь кратко по пунктам:
 
-1. ОСНОВНЫЕ РИСКИ (Высокий/Средний/Низкий)
-2. НЕЯСНЫЕ ФОРМУЛИРОВКИ  
+1. ОСНОВНЫЕ РИСКИ (высокий/средний/низкий)
+2. ЧТО НЕЯСНО ИЛИ ДВУСМЫСЛЕННО
 3. ЧТО РЕКОМЕНДУЕШЬ ИЗМЕНИТЬ
-4. ВОПРОСЫ К ВТОРОЙ СТОРОНЕ
+4. КАКИЕ ВОПРОСЫ ЗАДАТЬ ВТОРОЙ СТОРОНЕ
 
-ДОГОВОР:
-{text}
-
-Отвечай четко, по пунктам. Не выдумывай.
-"""
+Договор: {text}"""
         
         data = {
             "messages": [{"role": "user", "content": prompt}],
-            "generationOptions": {"maxTokens": 1500, "temperature": 0.1}
+            "generationOptions": {"maxTokens": 1000, "temperature": 0.1}
         }
         
         try:
-            response = requests.post(self.api_url, json=data, headers=self.headers, timeout=45)
+            response = requests.post(self.api_url, json=data, headers=self.headers, timeout=30)
             
             if response.status_code == 200:
                 result = response.json()
-                # Пытаемся извлечь ответ разными способами
-                if 'message' in result and 'content' in result['message']:
-                    return result['message']['content']
-                elif 'choices' in result and result['choices']:
-                    return result['choices'][0].get('message', {}).get('content', 'Нет ответа')
-                else:
-                    return str(result)[:1000]
+                # Пробуем разные форматы ответа
+                if isinstance(result, dict):
+                    if 'message' in result and 'content' in result['message']:
+                        return result['message']['content']
+                    elif 'choices' in result and result['choices']:
+                        return result['choices'][0].get('message', {}).get('content', 'Нет ответа')
+                    elif 'content' in result:
+                        return result['content']
+                
+                return str(result)[:2000]
             else:
-                return f"❌ Ошибка API: {response.status_code}\n{response.text[:500]}"
+                return f"Ошибка API ({response.status_code}): {response.text[:200]}"
                 
         except Exception as e:
-            return f"⚠️ Ошибка связи: {str(e)}"
+            return f"Ошибка: {str(e)}"
 
-# ========== ФУНКЦИИ ДЛЯ РАБОТЫ С ФАЙЛАМИ ==========
-def extract_text_from_pdf(file_path):
-    """Извлечение текста из PDF"""
+# ========== ОБРАБОТКА ТЕКСТА ИЗ ФАЙЛОВ ==========
+def read_text_file(file_path):
+    """Чтение текстовых файлов"""
     try:
-        import PyPDF2
-        text = ""
-        with open(file_path, 'rb') as file:
-            pdf = PyPDF2.PdfReader(file)
-            for page in pdf.pages:
-                page_text = page.extract_text()
-                if page_text:
-                    text += page_text + "\n\n"
-        return text if text else "Не удалось извлечь текст из PDF"
-    except Exception as e:
-        return f"Ошибка PDF: {str(e)}"
-
-def extract_text_from_docx(file_path):
-    """Извлечение текста из DOCX"""
-    try:
-        from docx import Document
-        doc = Document(file_path)
-        return "\n".join([para.text for para in doc.paragraphs])
-    except Exception as e:
-        return f"Ошибка DOCX: {str(e)}"
-
-def extract_text_from_file(file_path, file_ext):
-    """Определяет тип файла и извлекает текст"""
-    if file_ext == '.pdf':
-        return extract_text_from_pdf(file_path)
-    elif file_ext in ['.docx', '.doc']:
-        return extract_text_from_docx(file_path)
-    elif file_ext == '.txt':
         with open(file_path, 'r', encoding='utf-8') as f:
             return f.read()
-    else:
-        return "Неподдерживаемый формат"
+    except:
+        try:
+            with open(file_path, 'r', encoding='cp1251') as f:
+                return f.read()
+        except Exception as e:
+            return f"Ошибка чтения: {str(e)}"
 
-# ========== ФУНКЦИИ БАЗЫ ДАННЫХ ==========
-def get_user_checks(user_id):
-    """Получить количество использованных проверок"""
-    conn = sqlite3.connect('bot.db')
-    cursor = conn.cursor()
-    cursor.execute('SELECT checks_used FROM users WHERE user_id = ?', (user_id,))
-    result = cursor.fetchone()
-    conn.close()
-    return result[0] if result else 0
-
-def add_check_to_db(user_id, filename, result):
-    """Сохранить проверку в БД"""
-    conn = sqlite3.connect('bot.db')
-    cursor = conn.cursor()
-    
-    # Добавляем или обновляем пользователя
-    cursor.execute('''
-        INSERT OR REPLACE INTO users (user_id, checks_used, last_check_time) 
-        VALUES (?, COALESCE((SELECT checks_used FROM users WHERE user_id = ?), 0) + 1, CURRENT_TIMESTAMP)
-    ''', (user_id, user_id))
-    
-    # Сохраняем историю
-    cursor.execute('''
-        INSERT INTO checks (user_id, filename, result) 
-        VALUES (?, ?, ?)
-    ''', (user_id, filename, result[:300]))
-    
-    conn.commit()
-    conn.close()
-
-# ========== ОБРАБОТЧИКИ TELEGRAM ==========
-async def start_command(update: Update, context: CallbackContext):
+# ========== TELEGRAM КОМАНДЫ ==========
+async def start(update: Update, context: CallbackContext):
     """Команда /start"""
     user = update.effective_user
-    checks_used = get_user_checks(user.id)
-    checks_left = FREE_CHECKS - checks_used
+    checks = get_checks(user.id)
     
-    text = f"""
-👋 *Привет, {user.first_name}!*
+    text = f"""👋 Привет, {user.first_name}!
 
-Я — бот для проверки договоров.
-Отправь мне договор в формате *PDF* или *DOCX*.
+Я бот для проверки договоров.
+Отправь мне текст договора или файл (.txt).
 
-📊 *Ваши проверки:*
-• Использовано: {checks_used}
-• Бесплатных осталось: {checks_left}
-• Цена после: *{SINGLE_CHECK_PRICE}₽* за проверку
+📊 Проверок использовано: {checks}
+🎁 Бесплатных осталось: {FREE_CHECKS - checks}
+💸 После: {PRICE_PER_CHECK}₽ за проверку
 
-📌 *Как работает:*
-1. Отправь договор
-2. Получи анализ рисков
-3. Используй в переговорах
-
-⚠️ *Важно:* Я не заменяю юриста!
-    """
+Просто отправь текст договора или файл .txt"""
     
-    await update.message.reply_text(text, parse_mode='Markdown')
+    await update.message.reply_text(text)
 
-async def help_command(update: Update, context: CallbackContext):
+async def help_cmd(update: Update, context: CallbackContext):
     """Команда /help"""
-    text = """
-📖 *Помощь*
+    text = """📖 Помощь:
 
-*Что умею:*
-• Анализировать договоры (PDF, DOCX, DOC, TXT)
-• Находить скрытые риски
-• Давать рекомендации
+1. Отправьте текст договора сообщением
+2. Или отправьте файл .txt с договором
+3. Получите анализ рисков
 
-*Как использовать:*
-1. Отправьте договор файлом
-2. Подождите 20-60 секунд
-3. Получите анализ
-
-*Форматы:* PDF, DOCX, DOC, TXT
-*Максимальный размер:* 15 MB
-
-*Тарифы:*
-• Первая проверка — бесплатно
-• Последующие — 69₽ за штуку
-
-*Поддержка:* @ваш_ник (укажите свой)
-    """
-    await update.message.reply_text(text, parse_mode='Markdown')
-
-async def handle_document(update: Update, context: CallbackContext):
-    """Обработка загруженного документа"""
-    user = update.effective_user
-    document = update.message.document
+⚠️ Пока поддерживается только текст
+💸 Цена: 69₽ за проверку (первая бесплатно)"""
     
-    # Проверка лимитов
-    checks_used = get_user_checks(user.id)
-    if checks_used >= FREE_CHECKS:
-        await update.message.reply_text(
-            f"❌ *Бесплатные проверки закончились*\n\n"
-            f"Для продолжения нужно оплатить проверку:\n"
-            f"• Цена: *{SINGLE_CHECK_PRICE}₽*\n"
-            f"• Реквизиты: 2200 1234 5678 9012\n"
-            f"• В комментарии: ID:{user.id}\n\n"
-            f"После оплаты отправьте скриншот чека.",
-            parse_mode='Markdown'
-        )
-        return
-    
-    # Проверка формата
-    file_name = document.file_name or "document"
-    file_ext = os.path.splitext(file_name)[1].lower()
-    
-    if file_ext not in SUPPORTED_FORMATS:
-        await update.message.reply_text(
-            f"❌ *Неподдерживаемый формат*\n\n"
-            f"Поддерживаю: {', '.join(SUPPORTED_FORMATS)}\n"
-            f"Ваш файл: {file_ext}",
-            parse_mode='Markdown'
-        )
-        return
-    
-    # Проверка размера
-    max_size = MAX_FILE_SIZE_MB * 1024 * 1024
-    if document.file_size > max_size:
-        await update.message.reply_text(
-            f"❌ *Файл слишком большой*\n\n"
-            f"Максимум: {MAX_FILE_SIZE_MB} MB\n"
-            f"Ваш файл: {document.file_size // (1024*1024)} MB",
-            parse_mode='Markdown'
-        )
-        return
-    
-    # Начинаем обработку
-    status_msg = await update.message.reply_text("📥 *Скачиваю файл...*", parse_mode='Markdown')
-    
-    try:
-        # Шаг 1: Скачивание
-        await status_msg.edit_text("📥 *Скачиваю файл...*")
-        file = await document.get_file()
-        
-        with tempfile.NamedTemporaryFile(delete=False, suffix=file_ext) as tmp:
-            tmp_path = tmp.name
-            await file.download_to_drive(tmp_path)
-        
-        # Шаг 2: Извлечение текста
-        await status_msg.edit_text("🔍 *Извлекаю текст...*")
-        text = extract_text_from_file(tmp_path, file_ext)
-        
-        if len(text) < 100:
-            await status_msg.edit_text(
-                "❌ *Не удалось извлечь текст*\n\n"
-                "Возможные причины:\n"
-                "• Файл поврежден\n"
-                "• Это скан (нужен OCR)\n"
-                "• Файл пустой\n\n"
-                "Попробуйте текстовый PDF или DOCX."
-            )
-            os.unlink(tmp_path)
-            return
-        
-        # Шаг 3: Анализ ИИ
-        await status_msg.edit_text("🤖 *Анализирую договор...*")
-        analyzer = YandexGPTAnalyzer()
-        result = analyzer.analyze(text)
-        
-        # Шаг 4: Сохранение в БД
-        add_check_to_db(user.id, file_name, result)
-        
-        # Шаг 5: Отправка результата
-        checks_left = FREE_CHECKS - (checks_used + 1)
-        
-        response_text = f"""
-📋 *Анализ договора: {file_name}*
-
-{result[:3500]}
-
-📊 *Ваши проверки:*
-• Использовано: {checks_used + 1}
-• Бесплатных осталось: {checks_left}
-
-💸 *После окончания:* {SINGLE_CHECK_PRICE}₽ за проверку
-
-⚠️ *Это не юридическая консультация.*
-Для важных договоров обратитесь к юристу.
-        """
-        
-        await status_msg.edit_text(response_text[:4096], parse_mode='Markdown')
-        
-        # Если результат длинный, отправляем вторую часть
-        if len(result) > 3500:
-            await update.message.reply_text(
-                f"*Продолжение анализа:*\n\n{result[3500:7000]}",
-                parse_mode='Markdown'
-            )
-    
-    except Exception as e:
-        logger.error(f"Ошибка обработки документа: {e}")
-        await status_msg.edit_text(f"❌ *Ошибка обработки:*\n\n{str(e)[:500]}")
-    
-    finally:
-        # Удаляем временный файл
-        if 'tmp_path' in locals() and os.path.exists(tmp_path):
-            os.unlink(tmp_path)
+    await update.message.reply_text(text)
 
 async def handle_text(update: Update, context: CallbackContext):
     """Обработка текстовых сообщений"""
+    user = update.effective_user
     text = update.message.text
     
     if text.startswith('/'):
         return
     
-    await update.message.reply_text(
-        "📎 *Отправьте договор файлом*\n\n"
-        "Я анализирую только файлы:\n"
-        "• PDF (текстовый)\n"
-        "• DOCX / DOC\n"
-        "• TXT\n\n"
-        "Напишите /help для подробностей.",
-        parse_mode='Markdown'
-    )
+    # Проверка лимитов
+    checks = get_checks(user.id)
+    if checks >= FREE_CHECKS:
+        await update.message.reply_text(
+            f"❌ Бесплатные проверки закончились.\n"
+            f"Оплатите {PRICE_PER_CHECK}₽ на карту: 2200 1234 5678 9012\n"
+            f"В комментарии: ID:{user.id}"
+        )
+        return
+    
+    # Анализ
+    msg = await update.message.reply_text("🤖 Анализирую...")
+    
+    analyzer = SimpleAnalyzer()
+    result = analyzer.analyze(text)
+    
+    # Сохраняем
+    add_check(user.id)
+    
+    # Отправляем результат
+    response = f"""📋 Результат анализа:
+
+{result[:3000]}
+
+✅ Проверок использовано: {checks + 1}
+🎁 Бесплатных осталось: {FREE_CHECKS - (checks + 1)}"""
+    
+    await msg.edit_text(response)
+
+async def handle_document(update: Update, context: CallbackContext):
+    """Обработка документов (только .txt)"""
+    user = update.effective_user
+    document = update.message.document
+    
+    # Проверка лимитов
+    checks = get_checks(user.id)
+    if checks >= FREE_CHECKS:
+        await update.message.reply_text(
+            f"❌ Бесплатные проверки закончились.\n"
+            f"Оплатите {PRICE_PER_CHECK}₽ на карту: 2200 1234 5678 9012\n"
+            f"В комментарии: ID:{user.id}"
+        )
+        return
+    
+    # Проверка размера
+    if document.file_size > MAX_FILE_SIZE:
+        await update.message.reply_text("❌ Файл слишком большой (макс 15MB)")
+        return
+    
+    # Проверка формата
+    file_name = document.file_name or "document.txt"
+    if not file_name.lower().endswith('.txt'):
+        await update.message.reply_text("❌ Поддерживаются только .txt файлы")
+        return
+    
+    msg = await update.message.reply_text("📥 Загружаю файл...")
+    
+    try:
+        # Скачиваем
+        file = await document.get_file()
+        with tempfile.NamedTemporaryFile(delete=False, suffix='.txt', mode='w') as tmp:
+            tmp_path = tmp.name
+        
+        await file.download_to_drive(tmp_path)
+        
+        # Читаем
+        await msg.edit_text("📖 Читаю текст...")
+        text = read_text_file(tmp_path)
+        
+        if len(text) < 50:
+            await msg.edit_text("❌ Файл слишком короткий или пустой")
+            return
+        
+        # Анализируем
+        await msg.edit_text("🤖 Анализирую...")
+        analyzer = SimpleAnalyzer()
+        result = analyzer.analyze(text)
+        
+        # Сохраняем
+        add_check(user.id)
+        
+        # Отправляем результат
+        response = f"""📋 Анализ файла: {file_name}
+
+{result[:3000]}
+
+✅ Проверок использовано: {checks + 1}
+🎁 Бесплатных осталось: {FREE_CHECKS - (checks + 1)}"""
+        
+        await msg.edit_text(response)
+        
+    except Exception as e:
+        await msg.edit_text(f"❌ Ошибка: {str(e)}")
+    finally:
+        # Удаляем временный файл
+        if 'tmp_path' in locals() and os.path.exists(tmp_path):
+            os.unlink(tmp_path)
 
 # ========== ЗАПУСК БОТА ==========
 def main():
-    """Запуск бота"""
+    """Основная функция запуска"""
     
-    # Проверяем наличие библиотек
-    try:
-        import PyPDF2
-        import docx
-    except ImportError:
-        print("❌ Установите зависимости:")
-        print("pip install python-telegram-bot PyPDF2 python-docx requests")
+    if not TELEGRAM_OK:
+        print("❌ Установите python-telegram-bot:")
+        print("pip install python-telegram-bot")
         return
-    
-    # Инициализируем БД
-    if not os.path.exists('bot.db'):
-        import database
-        database.init_db()
-        print("✅ База данных создана")
     
     # Создаем приложение
     app = Application.builder().token(BOT_TOKEN).build()
     
     # Регистрируем обработчики
-    app.add_handler(CommandHandler("start", start_command))
-    app.add_handler(CommandHandler("help", help_command))
-    app.add_handler(MessageHandler(filters.Document.ALL, handle_document))
+    app.add_handler(CommandHandler("start", start))
+    app.add_handler(CommandHandler("help", help_cmd))
     app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, handle_text))
+    app.add_handler(MessageHandler(filters.Document.ALL, handle_document))
     
     # Запускаем
-    logger.info("🤖 Бот запущен...")
     print("=" * 50)
-    print("Contract Check Bot")
-    print(f"Бесплатных проверок: {FREE_CHECKS}")
-    print(f"Цена за проверку: {SINGLE_CHECK_PRICE}₽")
+    print("🤖 Contract Check Bot запущен!")
+    print(f"💰 Цена за проверку: {PRICE_PER_CHECK}₽")
+    print(f"🎁 Бесплатных: {FREE_CHECKS}")
     print("=" * 50)
     
-    app.run_polling(allowed_updates=Update.ALL_TYPES)
+    app.run_polling(allowed_updates="all")
 
+# ========== ДЛЯ RAILWAY ==========
 if __name__ == "__main__":
-    main()
+    # Проверяем переменные окружения Railway
+    if os.environ.get("RAILWAY_ENVIRONMENT"):
+        print("🚂 Запуск на Railway...")
+        
+        # Railway может передать токен через переменные
+        railway_token = os.environ.get("BOT_TOKEN")
+        if railway_token and railway_token != BOT_TOKEN:
+            BOT_TOKEN = railway_token
+            print("✅ Использую токен из Railway")
+    
+    # Запускаем бота
+    try:
+        main()
+    except Exception as e:
+        print(f"❌ Критическая ошибка: {e}")
+        # Перезапуск через 5 секунд
+        import time
+        time.sleep(5)
+        main()
