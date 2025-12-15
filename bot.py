@@ -1,13 +1,12 @@
 """
-Telegram бот для проверки договоров
-ВСЁ В ОДНОМ ФАЙЛЕ - для Railway
+Telegram бот для проверки договоров через YandexGPT
+ИСПРАВЛЕНО для Railway
 """
 
 import os
 import logging
 import tempfile
 import requests
-import sqlite3
 import asyncio
 from datetime import datetime
 
@@ -22,14 +21,24 @@ FREE_CHECKS = 1
 PRICE_PER_CHECK = 69
 MAX_FILE_SIZE = 15 * 1024 * 1024  # 15 MB
 
-# ========== TELEGRAM ИМПОРТ ==========
+# ========== ИМПОРТ С ПРОВЕРКОЙ ВЕРСИИ ==========
 try:
+    # Пробуем импорт для новой версии (20.x)
     from telegram import Update
     from telegram.ext import Application, CommandHandler, MessageHandler, filters, CallbackContext
-    TELEGRAM_OK = True
+    print("✅ Использую python-telegram-bot 20.x")
+    TELEGRAM_VERSION = 20
 except ImportError:
-    TELEGRAM_OK = False
-    print("⚠️ Установите: pip install python-telegram-bot")
+    try:
+        # Пробуем импорт для старой версии (13.x)
+        import telegram
+        from telegram import Update
+        from telegram.ext import Updater, CommandHandler, MessageHandler, Filters, CallbackContext
+        print("✅ Использую python-telegram-bot 13.x")
+        TELEGRAM_VERSION = 13
+    except ImportError:
+        print("❌ Установите: pip install python-telegram-bot==13.15")
+        TELEGRAM_VERSION = None
 
 # ========== НАСТРОЙКА ЛОГИРОВАНИЯ ==========
 logging.basicConfig(
@@ -38,19 +47,24 @@ logging.basicConfig(
 )
 logger = logging.getLogger(__name__)
 
-# ========== БАЗА ДАННЫХ (В ПАМЯТИ ДЛЯ RAILWAY) ==========
-user_checks = {}  # {user_id: checks_count}
+# ========== ПРОСТАЯ БАЗА ДАННЫХ ==========
+class SimpleDB:
+    def __init__(self):
+        self.user_data = {}
+    
+    def get_checks(self, user_id):
+        return self.user_data.get(user_id, {}).get('checks', 0)
+    
+    def add_check(self, user_id, filename=""):
+        if user_id not in self.user_data:
+            self.user_data[user_id] = {'checks': 0}
+        self.user_data[user_id]['checks'] += 1
+        return self.user_data[user_id]['checks']
 
-def get_checks(user_id):
-    """Получить количество проверок пользователя"""
-    return user_checks.get(user_id, 0)
-
-def add_check(user_id):
-    """Добавить проверку"""
-    user_checks[user_id] = user_checks.get(user_id, 0) + 1
+db = SimpleDB()
 
 # ========== YANDEX GPT АНАЛИЗ ==========
-class SimpleAnalyzer:
+class YandexAnalyzer:
     def __init__(self):
         self.api_url = f"https://agent.llm.api.cloud.yandex.net/llm/v2/folders/{YC_FOLDER_ID}/agents/{YC_AGENT_ID}:chat"
         self.headers = {
@@ -59,241 +73,257 @@ class SimpleAnalyzer:
         }
     
     def analyze(self, text):
-        """Простой анализ текста"""
-        if len(text) > 30000:
-            text = text[:30000] + "... [текст сокращен]"
+        """Анализ текста договора"""
+        if len(text) > 25000:
+            text = text[:25000] + "... [текст сокращен]"
         
-        prompt = f"""Проанализируй этот договор как юрист. Ответь кратко по пунктам:
+        prompt = f"""Ты опытный юрист. Проанализируй договор и выдели:
 
-1. ОСНОВНЫЕ РИСКИ (высокий/средний/низкий)
-2. ЧТО НЕЯСНО ИЛИ ДВУСМЫСЛЕННО
-3. ЧТО РЕКОМЕНДУЕШЬ ИЗМЕНИТЬ
-4. КАКИЕ ВОПРОСЫ ЗАДАТЬ ВТОРОЙ СТОРОНЕ
+1. ГЛАВНЫЕ РИСКИ (высокий/средний/низкий)
+2. НЕПОНЯТНЫЕ МОМЕНТЫ
+3. ЧТО ЛУЧШЕ ИЗМЕНИТЬ
+4. ВОПРОСЫ К КОНТРАГЕНТУ
 
-Договор: {text}"""
+Договор:
+{text}
+
+Ответь кратко и по делу. Указывай конкретные пункты."""
         
         data = {
             "messages": [{"role": "user", "content": prompt}],
-            "generationOptions": {"maxTokens": 1000, "temperature": 0.1}
+            "generationOptions": {"maxTokens": 1500, "temperature": 0.1}
         }
         
         try:
-            response = requests.post(self.api_url, json=data, headers=self.headers, timeout=30)
+            response = requests.post(self.api_url, json=data, headers=self.headers, timeout=45)
             
             if response.status_code == 200:
                 result = response.json()
-                # Пробуем разные форматы ответа
+                
+                # Разные варианты извлечения ответа
                 if isinstance(result, dict):
                     if 'message' in result and 'content' in result['message']:
                         return result['message']['content']
                     elif 'choices' in result and result['choices']:
-                        return result['choices'][0].get('message', {}).get('content', 'Нет ответа')
-                    elif 'content' in result:
-                        return result['content']
+                        choice = result['choices'][0]
+                        if 'message' in choice and 'content' in choice['message']:
+                            return choice['message']['content']
+                    elif 'text' in result:
+                        return result['text']
                 
-                return str(result)[:2000]
+                # Если структура незнакомая
+                import json
+                return f"Ответ ИИ:\n{json.dumps(result, ensure_ascii=False, indent=2)[:2000]}"
+                
             else:
-                return f"Ошибка API ({response.status_code}): {response.text[:200]}"
+                return f"⚠️ Ошибка API ({response.status_code})\nПопробуйте позже."
                 
+        except requests.exceptions.Timeout:
+            return "⏱️ Время ожидания истекло. Попробуйте отправить текст покороче."
         except Exception as e:
-            return f"Ошибка: {str(e)}"
+            return f"❌ Ошибка: {str(e)[:200]}"
 
-# ========== ОБРАБОТКА ТЕКСТА ИЗ ФАЙЛОВ ==========
-def read_text_file(file_path):
-    """Чтение текстовых файлов"""
-    try:
-        with open(file_path, 'r', encoding='utf-8') as f:
-            return f.read()
-    except:
-        try:
-            with open(file_path, 'r', encoding='cp1251') as f:
-                return f.read()
-        except Exception as e:
-            return f"Ошибка чтения: {str(e)}"
-
-# ========== TELEGRAM КОМАНДЫ ==========
-async def start(update: Update, context: CallbackContext):
-    """Команда /start"""
-    user = update.effective_user
-    checks = get_checks(user.id)
-    
-    text = f"""👋 Привет, {user.first_name}!
+# ========== ФУНКЦИИ ДЛЯ ВЕРСИИ 13.x ==========
+if TELEGRAM_VERSION == 13:
+    def start_13(update, context):
+        user = update.effective_user
+        checks = db.get_checks(user.id)
+        
+        text = f"""👋 Привет, {user.first_name}!
 
 Я бот для проверки договоров.
-Отправь мне текст договора или файл (.txt).
+Просто отправь текст договора.
 
-📊 Проверок использовано: {checks}
-🎁 Бесплатных осталось: {FREE_CHECKS - checks}
+📊 Проверок: {checks}/{FREE_CHECKS}
 💸 После: {PRICE_PER_CHECK}₽ за проверку
 
-Просто отправь текст договора или файл .txt"""
-    
-    await update.message.reply_text(text)
-
-async def help_cmd(update: Update, context: CallbackContext):
-    """Команда /help"""
-    text = """📖 Помощь:
-
-1. Отправьте текст договора сообщением
-2. Или отправьте файл .txt с договором
-3. Получите анализ рисков
-
-⚠️ Пока поддерживается только текст
-💸 Цена: 69₽ за проверку (первая бесплатно)"""
-    
-    await update.message.reply_text(text)
-
-async def handle_text(update: Update, context: CallbackContext):
-    """Обработка текстовых сообщений"""
-    user = update.effective_user
-    text = update.message.text
-    
-    if text.startswith('/'):
-        return
-    
-    # Проверка лимитов
-    checks = get_checks(user.id)
-    if checks >= FREE_CHECKS:
-        await update.message.reply_text(
-            f"❌ Бесплатные проверки закончились.\n"
-            f"Оплатите {PRICE_PER_CHECK}₽ на карту: 2200 1234 5678 9012\n"
-            f"В комментарии: ID:{user.id}"
-        )
-        return
-    
-    # Анализ
-    msg = await update.message.reply_text("🤖 Анализирую...")
-    
-    analyzer = SimpleAnalyzer()
-    result = analyzer.analyze(text)
-    
-    # Сохраняем
-    add_check(user.id)
-    
-    # Отправляем результат
-    response = f"""📋 Результат анализа:
-
-{result[:3000]}
-
-✅ Проверок использовано: {checks + 1}
-🎁 Бесплатных осталось: {FREE_CHECKS - (checks + 1)}"""
-    
-    await msg.edit_text(response)
-
-async def handle_document(update: Update, context: CallbackContext):
-    """Обработка документов (только .txt)"""
-    user = update.effective_user
-    document = update.message.document
-    
-    # Проверка лимитов
-    checks = get_checks(user.id)
-    if checks >= FREE_CHECKS:
-        await update.message.reply_text(
-            f"❌ Бесплатные проверки закончились.\n"
-            f"Оплатите {PRICE_PER_CHECK}₽ на карту: 2200 1234 5678 9012\n"
-            f"В комментарии: ID:{user.id}"
-        )
-        return
-    
-    # Проверка размера
-    if document.file_size > MAX_FILE_SIZE:
-        await update.message.reply_text("❌ Файл слишком большой (макс 15MB)")
-        return
-    
-    # Проверка формата
-    file_name = document.file_name or "document.txt"
-    if not file_name.lower().endswith('.txt'):
-        await update.message.reply_text("❌ Поддерживаются только .txt файлы")
-        return
-    
-    msg = await update.message.reply_text("📥 Загружаю файл...")
-    
-    try:
-        # Скачиваем
-        file = await document.get_file()
-        with tempfile.NamedTemporaryFile(delete=False, suffix='.txt', mode='w') as tmp:
-            tmp_path = tmp.name
+Отправь текст договора сообщением."""
         
-        await file.download_to_drive(tmp_path)
+        update.message.reply_text(text)
+    
+    def help_13(update, context):
+        text = """📖 Помощь:
+
+1. Отправьте текст договора
+2. Получите анализ рисков
+3. Используйте в переговорах
+
+💰 Цена: 69₽ за проверку (первая бесплатно)
+⚠️ Не заменяет юриста!"""
         
-        # Читаем
-        await msg.edit_text("📖 Читаю текст...")
-        text = read_text_file(tmp_path)
+        update.message.reply_text(text)
+    
+    def handle_text_13(update, context):
+        user = update.effective_user
+        text = update.message.text
         
-        if len(text) < 50:
-            await msg.edit_text("❌ Файл слишком короткий или пустой")
+        if text.startswith('/'):
             return
         
-        # Анализируем
-        await msg.edit_text("🤖 Анализирую...")
-        analyzer = SimpleAnalyzer()
+        checks = db.get_checks(user.id)
+        if checks >= FREE_CHECKS:
+            update.message.reply_text(
+                f"❌ Бесплатные проверки закончились.\n"
+                f"Оплатите {PRICE_PER_CHECK}₽ на карту:\n"
+                f"2200 1234 5678 9012\n"
+                f"В комментарии: ID:{user.id}"
+            )
+            return
+        
+        msg = update.message.reply_text("🤖 Анализирую...")
+        
+        analyzer = YandexAnalyzer()
         result = analyzer.analyze(text)
         
-        # Сохраняем
-        add_check(user.id)
+        db.add_check(user.id)
         
-        # Отправляем результат
-        response = f"""📋 Анализ файла: {file_name}
+        response = f"""📋 Результат анализа:
 
-{result[:3000]}
+{result[:2500]}
 
-✅ Проверок использовано: {checks + 1}
-🎁 Бесплатных осталось: {FREE_CHECKS - (checks + 1)}"""
+✅ Проверок: {checks + 1}/{FREE_CHECKS}"""
+        
+        msg.edit_text(response)
+    
+    def main_13():
+        """Запуск для версии 13.x"""
+        updater = Updater(BOT_TOKEN, use_context=True)
+        dp = updater.dispatcher
+        
+        dp.add_handler(CommandHandler("start", start_13))
+        dp.add_handler(CommandHandler("help", help_13))
+        dp.add_handler(MessageHandler(Filters.text & ~Filters.command, handle_text_13))
+        
+        print("=" * 50)
+        print("🤖 Бот запущен (версия 13.x)")
+        print(f"💰 Цена: {PRICE_PER_CHECK}₽")
+        print(f"🎁 Бесплатных: {FREE_CHECKS}")
+        print("=" * 50)
+        
+        updater.start_polling()
+        updater.idle()
+
+# ========== ФУНКЦИИ ДЛЯ ВЕРСИИ 20.x ==========
+elif TELEGRAM_VERSION == 20:
+    async def start_20(update: Update, context: CallbackContext):
+        user = update.effective_user
+        checks = db.get_checks(user.id)
+        
+        text = f"""👋 Привет, {user.first_name}!
+
+Я бот для проверки договоров.
+Просто отправь текст договора.
+
+📊 Проверок: {checks}/{FREE_CHECKS}
+💸 После: {PRICE_PER_CHECK}₽ за проверку
+
+Отправь текст договора сообщением."""
+        
+        await update.message.reply_text(text)
+    
+    async def help_20(update: Update, context: CallbackContext):
+        text = """📖 Помощь:
+
+1. Отправьте текст договора
+2. Получите анализ рисков
+3. Используйте в переговорах
+
+💰 Цена: 69₽ за проверку (первая бесплатно)
+⚠️ Не заменяет юриста!"""
+        
+        await update.message.reply_text(text)
+    
+    async def handle_text_20(update: Update, context: CallbackContext):
+        user = update.effective_user
+        text = update.message.text
+        
+        if text.startswith('/'):
+            return
+        
+        checks = db.get_checks(user.id)
+        if checks >= FREE_CHECKS:
+            await update.message.reply_text(
+                f"❌ Бесплатные проверки закончились.\n"
+                f"Оплатите {PRICE_PER_CHECK}₽ на карту:\n"
+                f"2200 1234 5678 9012\n"
+                f"В комментарии: ID:{user.id}"
+            )
+            return
+        
+        msg = await update.message.reply_text("🤖 Анализирую...")
+        
+        analyzer = YandexAnalyzer()
+        result = analyzer.analyze(text)
+        
+        db.add_check(user.id)
+        
+        response = f"""📋 Результат анализа:
+
+{result[:2500]}
+
+✅ Проверок: {checks + 1}/{FREE_CHECKS}"""
         
         await msg.edit_text(response)
+    
+    def main_20():
+        """Запуск для версии 20.x"""
+        app = Application.builder().token(BOT_TOKEN).build()
         
-    except Exception as e:
-        await msg.edit_text(f"❌ Ошибка: {str(e)}")
-    finally:
-        # Удаляем временный файл
-        if 'tmp_path' in locals() and os.path.exists(tmp_path):
-            os.unlink(tmp_path)
+        app.add_handler(CommandHandler("start", start_20))
+        app.add_handler(CommandHandler("help", help_20))
+        app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, handle_text_20))
+        
+        print("=" * 50)
+        print("🤖 Бот запущен (версия 20.x)")
+        print(f"💰 Цена: {PRICE_PER_CHECK}₽")
+        print(f"🎁 Бесплатных: {FREE_CHECKS}")
+        print("=" * 50)
+        
+        app.run_polling()
 
-# ========== ЗАПУСК БОТА ==========
+# ========== ОСНОВНОЙ ЗАПУСК ==========
 def main():
-    """Основная функция запуска"""
-    
-    if not TELEGRAM_OK:
-        print("❌ Установите python-telegram-bot:")
+    """Определяем версию и запускаем"""
+    if TELEGRAM_VERSION == 13:
+        main_13()
+    elif TELEGRAM_VERSION == 20:
+        main_20()
+    else:
+        print("❌ Установите библиотеку:")
+        print("pip install python-telegram-bot==13.15")
+        print("или")
         print("pip install python-telegram-bot")
-        return
-    
-    # Создаем приложение
-    app = Application.builder().token(BOT_TOKEN).build()
-    
-    # Регистрируем обработчики
-    app.add_handler(CommandHandler("start", start))
-    app.add_handler(CommandHandler("help", help_cmd))
-    app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, handle_text))
-    app.add_handler(MessageHandler(filters.Document.ALL, handle_document))
-    
-    # Запускаем
-    print("=" * 50)
-    print("🤖 Contract Check Bot запущен!")
-    print(f"💰 Цена за проверку: {PRICE_PER_CHECK}₽")
-    print(f"🎁 Бесплатных: {FREE_CHECKS}")
-    print("=" * 50)
-    
-    app.run_polling(allowed_updates="all")
 
-# ========== ДЛЯ RAILWAY ==========
+# ========== ЗАПУСК ==========
 if __name__ == "__main__":
-    # Проверяем переменные окружения Railway
+    # Проверяем Railway переменные
     if os.environ.get("RAILWAY_ENVIRONMENT"):
-        print("🚂 Запуск на Railway...")
-        
-        # Railway может передать токен через переменные
-        railway_token = os.environ.get("BOT_TOKEN")
-        if railway_token and railway_token != BOT_TOKEN:
-            BOT_TOKEN = railway_token
-            print("✅ Использую токен из Railway")
+        print("🚂 Railway обнаружен")
+        # Используем токен из Railway если есть
+        rail_token = os.environ.get("BOT_TOKEN")
+        if rail_token:
+            BOT_TOKEN = rail_token
+            print("✅ Токен взят из Railway")
+    
+    # Проверяем ключи
+    if not all([BOT_TOKEN, YC_API_KEY, YC_FOLDER_ID, YC_AGENT_ID]):
+        print("❌ Не все ключи заполнены!")
+        print("Проверьте: BOT_TOKEN, YC_API_KEY, YC_FOLDER_ID, YC_AGENT_ID")
+        exit(1)
+    
+    # Проверяем подключение к Яндекс
+    print("🔗 Проверяю подключение к Яндекс GPT...")
+    analyzer = YandexAnalyzer()
+    test_result = analyzer.analyze("Тестовый запрос")
+    if "Ошибка" in test_result or "⚠️" in test_result:
+        print(f"❌ Яндекс GPT: {test_result[:100]}")
+    else:
+        print("✅ Яндекс GPT подключен")
     
     # Запускаем бота
     try:
         main()
     except Exception as e:
-        print(f"❌ Критическая ошибка: {e}")
-        # Перезапуск через 5 секунд
-        import time
-        time.sleep(5)
-        main()
+        print(f"❌ Ошибка запуска: {e}")
+        print("Попробуйте другую версию библиотеки")
+        exit(1)
