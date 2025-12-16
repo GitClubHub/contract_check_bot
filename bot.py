@@ -1,18 +1,10 @@
-import telegram, os
-print("PTB version:", telegram.__version__)
-print("Telegram package path:", telegram.__file__)
-
 import os
-import telegram
-
-print("PTB version:", telegram.__version__)
-
 from telegram.ext import Application, CommandHandler
 
 BOT_TOKEN = os.getenv("BOT_TOKEN")
 
 async def start(update, context):
-    await update.message.reply_text("Бот работает!")
+    await update.message.reply_text("✅ Бот работает на PTB 20.7!")
 
 app = Application.builder().token(BOT_TOKEN).build()
 app.add_handler(CommandHandler("start", start))
