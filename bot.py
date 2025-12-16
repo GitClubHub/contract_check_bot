@@ -1,394 +1,269 @@
+#!/usr/bin/env python3
 """
-Contract Check Bot - Автономная версия
-Автоматически устанавливает зависимости при запуске
+Contract Check Bot - УЛЬТРАМИНИМАЛЬНАЯ ВЕРСИЯ
+Работает на любом Python 3.7+
 """
 
 import os
 import sys
-import subprocess
-import logging
-from datetime import datetime
+import time
+import json
 
 print("=" * 60)
 print("🤖 CONTRACT CHECK BOT - ЗАПУСК")
 print("=" * 60)
 
-# ========== АВТОМАТИЧЕСКАЯ УСТАНОВКА ЗАВИСИМОСТЕЙ ==========
-def install_dependencies():
-    """Автоматическая установка зависимостей"""
-    print("📦 Проверяю зависимости...")
+# ========== УСТАНОВКА ЗАВИСИМОСТЕЙ ==========
+def install_packages():
+    """Устанавливаем только необходимые пакеты"""
+    required = ["requests", "python-telegram-bot==13.15"]
     
-    dependencies = [
-        "python-telegram-bot==13.15",
-        "requests==2.31.0"
-    ]
-    
-    for dep in dependencies:
+    for package in required:
         try:
-            # Пробуем импорт
-            if "telegram" in dep:
-                __import__('telegram')
-                print(f"✅ {dep.split('==')[0]} уже установлен")
-            elif "requests" in dep:
-                __import__('requests')
-                print(f"✅ {dep.split('==')[0]} уже установлен")
+            if package == "requests":
+                import requests
+                print(f"✅ requests уже установлен")
+            elif "telegram" in package:
+                import telegram
+                print(f"✅ python-telegram-bot уже установлен")
         except ImportError:
-            # Устанавливаем если нет
-            print(f"⬇️ Устанавливаю {dep}...")
+            print(f"⬇️ Устанавливаю {package}...")
+            import subprocess
             try:
-                subprocess.check_call([sys.executable, "-m", "pip", "install", dep, "--quiet"])
-                print(f"✅ {dep} установлен")
-            except Exception as e:
-                print(f"❌ Ошибка установки {dep}: {e}")
-                return False
-    
-    return True
+                subprocess.check_call([sys.executable, "-m", "pip", "install", package])
+                print(f"✅ {package} установлен")
+            except:
+                print(f"⚠️ Не удалось установить {package}")
+                # Продолжаем без него
+                continue
 
-# Устанавливаем зависимости
-if not install_dependencies():
-    print("❌ Не удалось установить зависимости")
-    sys.exit(1)
+install_packages()
 
 # ========== ИМПОРТ ПОСЛЕ УСТАНОВКИ ==========
 try:
     import requests
-    import telegram
-    from telegram import Update
-    from telegram.ext import Updater, CommandHandler, MessageHandler, Filters, CallbackContext
-    print("✅ Все библиотеки загружены")
-except Exception as e:
-    print(f"❌ Ошибка импорта: {e}")
+    print("✅ requests загружен")
+except ImportError:
+    print("❌ requests не установлен")
     sys.exit(1)
 
+try:
+    # Импортируем только самое необходимое
+    import telegram
+    from telegram import Update
+    from telegram.ext import Updater, CommandHandler, MessageHandler, Filters
+    print("✅ telegram загружен")
+except ImportError as e:
+    print(f"❌ Ошибка импорта telegram: {e}")
+    print("Пробую альтернативный импорт...")
+    
+    try:
+        # Альтернативный импорт для старых версий
+        import telegram
+        from telegram.ext import Updater, CommandHandler, MessageHandler, Filters
+        print("✅ telegram загружен (альтернативный путь)")
+    except ImportError:
+        print("❌ Не удалось загрузить telegram")
+        print("Попробуйте вручную: pip install python-telegram-bot==13.15")
+        sys.exit(1)
+
 # ========== ВАШИ КЛЮЧИ ==========
-BOT_TOKEN = os.environ.get("BOT_TOKEN", "7840984761:AAEba5khaFEQ80LPIqT34QVJ84tTxQRlIMk")
-YC_API_KEY = os.environ.get("YC_API_KEY", "AQVNw1vfsx6MXgs3I-cmowKh2ZCD1xSHktDdW0ln")
-YC_FOLDER_ID = os.environ.get("YC_FOLDER_ID", "b1g4dtdoatk25ohp8m0u")
-YC_AGENT_ID = os.environ.get("YC_AGENT_ID", "fvt3629n2tdfefsjct9d")
+BOT_TOKEN = "7840984761:AAEba5khaFEQ80LPIqT34QVJ84tTxQRlIMk"
+YC_API_KEY = "AQVNw1vfsx6MXgs3I-cmowKh2ZCD1xSHktDdW0ln"
+YC_FOLDER_ID = "b1g4dtdoatk25ohp8m0u"
+YC_AGENT_ID = "fvt3629n2tdfefsjct9d"
 
 # ========== НАСТРОЙКИ ==========
 FREE_CHECKS = 1
-PRICE_PER_CHECK = 69
-
-# ========== ЛОГИРОВАНИЕ ==========
-logging.basicConfig(
-    format='%(asctime)s - %(name)s - %(levelname)s - %(message)s',
-    level=logging.INFO
-)
-logger = logging.getLogger(__name__)
+PRICE = 69
 
 # ========== ПРОСТАЯ БАЗА ДАННЫХ ==========
-class SimpleDB:
-    def __init__(self):
-        self.data = {}
-        print("💾 База данных инициализирована")
-    
-    def get_user(self, user_id):
-        if user_id not in self.data:
-            self.data[user_id] = {'checks': 0, 'last_check': None}
-        return self.data[user_id]
-    
-    def add_check(self, user_id):
-        user = self.get_user(user_id)
-        user['checks'] += 1
-        user['last_check'] = datetime.now()
-        return user['checks']
+users_db = {}
 
-db = SimpleDB()
+def get_user(user_id):
+    if user_id not in users_db:
+        users_db[user_id] = {"checks": 0, "name": "User"}
+    return users_db[user_id]
 
-# ========== ПРОСТОЙ АНАЛИЗАТОР (БЕЗ ЯНДЕКС ДЛЯ НАЧАЛА) ==========
-class ContractAnalyzer:
-    """Простой анализатор договоров"""
-    
+# ========== ПРОСТОЙ АНАЛИЗАТОР ==========
+class SimpleAnalyzer:
     def analyze(self, text):
-        """Базовый анализ текста"""
-        if len(text) < 100:
-            return "❌ Текст слишком короткий для анализа"
+        """Простой анализ текста"""
         
-        # Простые правила анализа
-        warnings = []
-        tips = []
+        if len(text) < 50:
+            return "❌ Текст слишком короткий. Нужно минимум 50 символов."
         
-        # Проверка длины
-        if len(text) > 10000:
-            warnings.append("⚠️ Договор очень длинный, могут быть скрытые условия")
-        elif len(text) < 500:
-            tips.append("💡 Договор очень короткий, возможно, не все условия прописаны")
-        
-        # Поиск ключевых слов
+        # Базовые проверки
+        checks = []
         text_lower = text.lower()
         
-        keywords = {
-            'односторонн': '⚠️ Проверьте условия одностороннего расторжения',
-            'штраф': '⚠️ Обратите внимание на размер штрафных санкций',
-            'пеня': '⚠️ Проверьте условия начисления пени',
-            'неустойк': '⚠️ Уточните размер неустойки',
-            'ответственност': '⚠️ Проверьте раздел об ответственности',
-            'конфиденциальн': '💡 Есть пункт о конфиденциальности',
-            'форс-мажор': '💡 Есть условие о форс-мажоре',
-            'арбитраж': '⚠️ Проверьте условия рассмотрения споров',
-            'юр. адрес': '✅ Указаны юридические адреса',
-            'паспорт': '✅ Указаны паспортные данные',
-        }
+        # Проверяем ключевые слова
+        if "односторонн" in text_lower:
+            checks.append("⚠️ Проверьте условия одностороннего расторжения")
         
-        for keyword, message in keywords.items():
-            if keyword in text_lower:
-                if '⚠️' in message:
-                    warnings.append(message)
-                else:
-                    tips.append(message)
+        if "штраф" in text_lower or "пеня" in text_lower:
+            checks.append("⚠️ Обратите внимание на штрафные санкции")
+        
+        if "ответственност" in text_lower:
+            checks.append("⚠️ Проверьте раздел об ответственности")
+        
+        if "юр. адрес" in text_lower or "паспорт" in text_lower:
+            checks.append("✅ Указаны реквизиты сторон")
         
         # Формируем ответ
-        result = "📋 *Результат проверки*\n\n"
+        result = f"📋 *Анализ договора*\n\n"
+        result += f"Длина текста: {len(text)} символов\n\n"
         
-        if warnings:
-            result += "*Внимание на эти пункты:*\n"
-            for w in warnings[:5]:
-                result += f"• {w}\n"
-            result += "\n"
+        if checks:
+            result += "*Обнаружено:*\n"
+            for check in checks[:5]:
+                result += f"• {check}\n"
+        else:
+            result += "✅ По базовым проверкам проблем не найдено\n"
         
-        if tips:
-            result += "*Что хорошо:*\n"
-            for t in tips[:5]:
-                result += f"• {t}\n"
-            result += "\n"
-        
-        if not warnings and not tips:
-            result += "✅ По базовым проверкам проблем не обнаружено\n\n"
-        
-        result += "*Общие рекомендации:*\n"
-        result += "1. Проверьте все суммы и сроки\n"
-        result += "2. Убедитесь, что понимаете все условия\n"
-        result += "3. Покажите договор юристу для важных сделок\n"
-        result += "4. Сохраните копию подписанного договора\n\n"
-        
-        result += f"*Статистика:* Текст {len(text)} символов, найдено {len(warnings)} предупреждений"
+        result += "\n*Рекомендации:*\n"
+        result += "1. Проверьте все даты и суммы\n"
+        result += "2. Убедитесь, что понимаете каждый пункт\n"
+        result += "3. Для важных сделок покажите договор юристу\n"
         
         return result
-    
-    def test_yandex(self):
-        """Проверка подключения к Яндекс GPT"""
-        if not all([YC_API_KEY, YC_FOLDER_ID, YC_AGENT_ID]):
-            return "❌ Не настроены ключи Яндекс"
-        
-        url = f"https://agent.llm.api.cloud.yandex.net/llm/v2/folders/{YC_FOLDER_ID}/agents/{YC_AGENT_ID}:chat"
-        headers = {"Authorization": f"Api-Key {YC_API_KEY}", "Content-Type": "application/json"}
-        
-        data = {
-            "messages": [{"role": "user", "content": "Привет"}],
-            "generationOptions": {"maxTokens": 10}
-        }
-        
-        try:
-            response = requests.post(url, json=data, headers=headers, timeout=10)
-            if response.status_code == 200:
-                return "✅ Яндекс GPT доступен"
-            else:
-                return f"❌ Яндекс GPT ошибка: {response.status_code}"
-        except Exception as e:
-            return f"❌ Яндекс GPT недоступен: {str(e)[:100]}"
 
 # ========== TELEGRAM КОМАНДЫ ==========
-def start_command(update, context):
-    """Обработчик /start"""
+def start(update, context):
     user = update.effective_user
-    user_data = db.get_user(user.id)
+    user_data = get_user(user.id)
     
-    text = f"""🤖 *Добро пожаловать!*
+    text = f"""👋 *Привет, {user.first_name}!*
 
-Я помогу проверить договор на основные риски.
+Я помогу проверить договор.
+
+*Как использовать:*
+Отправьте текст договора — я проанализирую его.
 
 *Ваша статистика:*
 ✓ Проверок: {user_data['checks']}
 ✓ Бесплатных осталось: {max(0, FREE_CHECKS - user_data['checks'])}
-✓ Цена после: {PRICE_PER_CHECK}₽
+✓ Цена после: {PRICE}₽
 
-*Как использовать:*
-1. Отправьте текст договора
-2. Получите анализ
-3. Используйте рекомендации
-
-Просто отправьте текст договора..."""
+*Просто отправьте текст договора...*"""
     
     update.message.reply_text(text, parse_mode='Markdown')
 
-def help_command(update, context):
-    """Обработчик /help"""
-    text = """📋 *Помощь*
+def help_cmd(update, context):
+    text = """📖 *Помощь*
 
-*Что умеет бот:*
-• Базовая проверка договоров
-• Поиск рискованных формулировок
-• Общие рекомендации
+*Что делает бот:*
+• Анализирует текст договоров
+• Ищет рискованные формулировки
+• Дает рекомендации
 
 *Тарифы:*
 • Первая проверка — бесплатно
 • Последующие — 69₽
 
-*Важно:*
-Это базовая проверка, не заменяющая юриста!
-Для важных сделок обратитесь к специалисту."""
-    
-    update.message.reply_text(text, parse_mode='Markdown')
-
-def check_command(update, context):
-    """Обработчик /check"""
-    text = """Чтобы проверить договор:
-1. Скопируйте текст договора
-2. Отправьте его мне сообщением
-3. Я проанализирую и дам рекомендации
-
-Примеры что искать:
-• Скрытые условия
-• Неясные формулировки  
-• Рискованные пункты"""
-    
-    update.message.reply_text(text, parse_mode='Markdown')
-
-def stats_command(update, context):
-    """Обработчик /stats"""
-    user = update.effective_user
-    user_data = db.get_user(user.id)
-    
-    analyzer = ContractAnalyzer()
-    yandex_status = analyzer.test_yandex()
-    
-    text = f"""📊 *Ваша статистика*
-
-*Проверки:*
-• Выполнено: {user_data['checks']}
-• Бесплатных осталось: {max(0, FREE_CHECKS - user_data['checks'])}
-• Последняя проверка: {user_data['last_check'] or 'еще не было'}
-
-*Система:*
-• Яндекс GPT: {yandex_status}
-• База данных: {len(db.data)} пользователей
-
-*Тарифы:*
-• Текущая цена: {PRICE_PER_CHECK}₽ за проверку
-• Бесплатный лимит: {FREE_CHECKS} проверка"""
+*Важно:* Это базовая проверка.
+Для важных договоров обратитесь к юристу."""
     
     update.message.reply_text(text, parse_mode='Markdown')
 
 def handle_text(update, context):
-    """Обработка текстовых сообщений"""
     user = update.effective_user
-    user_data = db.get_user(user.id)
+    user_data = get_user(user.id)
     text = update.message.text
     
-    # Игнорируем короткие сообщения и команды
-    if len(text) < 30 or text.startswith('/'):
+    # Игнорируем команды и короткие сообщения
+    if text.startswith('/') or len(text) < 20:
         return
     
-    # Проверка лимитов
+    # Проверяем лимиты
     if user_data['checks'] >= FREE_CHECKS:
         update.message.reply_text(
-            f"""❌ *Лимит проверок исчерпан*
-
-Вы использовали {user_data['checks']} проверок.
-
-Для продолжения оплатите {PRICE_PER_CHECK}₽:
-
-*Реквизиты:*
-💳 Карта: `2200 1234 5678 9012`
-📝 Комментарий: `ID:{user.id}`
-
-После оплаты отправьте скриншот.""",
+            f"❌ *Бесплатные проверки закончились*\n\n"
+            f"Для продолжения оплатите {PRICE}₽:\n"
+            f"💳 Карта: 2200 1234 5678 9012\n"
+            f"📝 Комментарий: ID:{user.id}\n\n"
+            f"После оплаты отправьте скриншок чека.",
             parse_mode='Markdown'
         )
         return
     
-    # Начинаем анализ
-    msg = update.message.reply_text("🔍 *Анализирую текст...*", parse_mode='Markdown')
+    # Анализируем
+    msg = update.message.reply_text("🔍 *Анализирую...*", parse_mode='Markdown')
     
     try:
-        # Анализируем
-        analyzer = ContractAnalyzer()
+        analyzer = SimpleAnalyzer()
         result = analyzer.analyze(text)
         
         # Сохраняем
-        db.add_check(user.id)
+        user_data['checks'] += 1
         
-        # Формируем итоговое сообщение
-        final_result = f"""{result}
-
-📈 *Ваша статистика:*
-• Проверок выполнено: {user_data['checks'] + 1}
-• Бесплатных осталось: {max(0, FREE_CHECKS - (user_data['checks'] + 1))}
-• Следующая проверка: {"бесплатна" if user_data['checks'] + 1 < FREE_CHECKS else f"{PRICE_PER_CHECK}₽"}"""
+        # Добавляем статистику
+        checks_left = FREE_CHECKS - user_data['checks']
+        result += f"\n\n📊 *Статистика:*\n"
+        result += f"• Проверок выполнено: {user_data['checks']}\n"
+        result += f"• Бесплатных осталось: {max(0, checks_left)}\n"
+        result += f"• Следующая проверка: {'бесплатна' if checks_left > 0 else f'{PRICE}₽'}"
         
-        # Отправляем
-        msg.edit_text(final_result, parse_mode='Markdown')
+        msg.edit_text(result, parse_mode='Markdown')
         
     except Exception as e:
-        logger.error(f"Ошибка анализа: {e}")
-        msg.edit_text(f"❌ *Ошибка анализа:*\n\n{str(e)[:200]}")
+        msg.edit_text(f"❌ Ошибка: {str(e)[:200]}")
 
 # ========== ЗАПУСК БОТА ==========
 def main():
-    """Основная функция"""
     print("\n" + "=" * 60)
     print("🚀 ЗАПУСК БОТА")
     print("=" * 60)
     
-    # Проверяем токен
-    if not BOT_TOKEN or "ваш_токен" in BOT_TOKEN:
-        print("❌ ОШИБКА: BOT_TOKEN не настроен!")
-        print("Добавьте в Railway Variables:")
-        print("BOT_TOKEN = 7840984761:AAEba5khaFEQ80LPIqT34QVJ84tTxQRlIMk")
-        return
-    
-    print(f"✅ BOT_TOKEN: {'Настроен' if BOT_TOKEN else 'Нет'}")
-    print(f"✅ YC_API_KEY: {'Настроен' if YC_API_KEY else 'Нет'}")
-    print(f"✅ YC_FOLDER_ID: {'Настроен' if YC_FOLDER_ID else 'Нет'}")
-    print(f"✅ YC_AGENT_ID: {'Настроен' if YC_AGENT_ID else 'Нет'}")
-    
-    # Проверяем Яндекс
-    analyzer = ContractAnalyzer()
-    yandex_status = analyzer.test_yandex()
-    print(f"🌐 Яндекс GPT: {yandex_status}")
-    
-    print(f"\n💰 Цена за проверку: {PRICE_PER_CHECK}₽")
+    print(f"🤖 Токен бота: {'✅' if BOT_TOKEN else '❌'}")
+    print(f"💰 Цена за проверку: {PRICE}₽")
     print(f"🎁 Бесплатных проверок: {FREE_CHECKS}")
-    print("=" * 60)
     
-    # Запускаем бота
     try:
-        print("🤖 Запускаю Telegram бота...")
+        print("\n🤖 Создаю Updater...")
         updater = Updater(BOT_TOKEN, use_context=True)
-        dispatcher = updater.dispatcher
         
-        # Регистрируем команды
-        dispatcher.add_handler(CommandHandler("start", start_command))
-        dispatcher.add_handler(CommandHandler("help", help_command))
-        dispatcher.add_handler(CommandHandler("check", check_command))
-        dispatcher.add_handler(CommandHandler("stats", stats_command))
-        dispatcher.add_handler(MessageHandler(Filters.text & ~Filters.command, handle_text))
+        print("✅ Updater создан")
+        print("📝 Регистрирую команды...")
         
-        print("✅ Бот запущен!")
-        print("⏳ Ожидаю сообщений...")
-        print("\nДля остановки: Ctrl+C")
+        dp = updater.dispatcher
+        dp.add_handler(CommandHandler("start", start))
+        dp.add_handler(CommandHandler("help", help_cmd))
+        dp.add_handler(MessageHandler(Filters.text, handle_text))
         
-        # Стартуем
+        print("✅ Команды зарегистрированы")
+        print("🚀 Запускаю бота...")
+        
         updater.start_polling()
+        
+        print("=" * 60)
+        print("✅ БОТ УСПЕШНО ЗАПУЩЕН!")
+        print("=" * 60)
+        print("\n📱 Теперь вы можете:")
+        print("1. Открыть Telegram")
+        print("2. Найти бота по ID: 7840984761")
+        print("3. Написать /start")
+        print("4. Отправить текст договора для анализа")
+        print("\n⏳ Бот работает и ждет сообщений...")
+        
+        # Держим бота активным
         updater.idle()
         
     except Exception as e:
-        print(f"\n❌ КРИТИЧЕСКАЯ ОШИБКА: {e}")
-        print("\nПопробуйте:")
-        print("1. Проверить BOT_TOKEN")
-        print("2. Перезапустить Railway")
-        print("3. Использовать другой хостинг")
+        print(f"\n❌ ОШИБКА: {e}")
+        print("\nВозможные решения:")
+        print("1. Проверьте BOT_TOKEN")
+        print("2. Перезапустите Railway: нажмите Redeploy")
+        print("3. Попробуйте локальный запуск:")
 
 # ========== ТОЧКА ВХОДА ==========
 if __name__ == "__main__":
     try:
         main()
     except KeyboardInterrupt:
-        print("\n\n👋 Бот остановлен")
+        print("\n👋 Бот остановлен пользователем")
     except Exception as e:
         print(f"\n💥 Неожиданная ошибка: {e}")
-        print("Перезапускаюсь через 5 секунд...")
-        import time
+        print("Попробую перезапуститься...")
         time.sleep(5)
         main()
