@@ -1,3 +1,7 @@
+import telegram, os
+print("PTB version:", telegram.__version__)
+print("Telegram package path:", telegram.__file__)
+
 import os
 import telegram
 
