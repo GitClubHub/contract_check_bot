@@ -2,9 +2,8 @@ FROM python:3.13-slim
 
 WORKDIR /app
 
-COPY requirements/requirements.txt /app/requirements.txt
+COPY requirements.txt /app/requirements.txt
 
-# Удаляем все старые версии PTB и telegram
 RUN pip install --upgrade pip \
     && pip uninstall -y python-telegram-bot telegram || true \
     && rm -rf /usr/local/lib/python3.13/site-packages/telegram \
