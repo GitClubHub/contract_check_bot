@@ -4,9 +4,10 @@ WORKDIR /app
 
 COPY requirements/requirements.txt /app/requirements.txt
 
-# Удаляем все следы старого PTB и ставим заново
+# Удаляем все старые версии PTB и telegram
 RUN pip install --upgrade pip \
     && pip uninstall -y python-telegram-bot telegram || true \
+    && rm -rf /usr/local/lib/python3.13/site-packages/telegram \
     && pip install --no-cache-dir -r requirements.txt \
     && pip install --no-cache-dir --upgrade python-telegram-bot==20.7
 
